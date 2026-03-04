@@ -1,0 +1,12 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+.logs/
+.codex/
+ios_spm_backup_*/
+ios/App/App/.env

@@ -1,0 +1,68 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:FILL@0..1&display=block');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "SF Pro Display", "SF Pro Icons", "Inter", "PingFang SC", "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-apple-bg: #F5F5F7;
+  --color-apple-card: #FFFFFF;
+  --color-apple-blue: #007AFF;
+  --color-apple-text: #1D1D1F;
+  --color-apple-gray: #86868B;
+  --color-apple-separator: #D2D2D7;
+}
+
+@layer base {
+  html, body {
+    @apply bg-apple-bg text-apple-text antialiased;
+  }
+}
+
+@layer components {
+  .apple-shadow {
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.04);
+  }
+  
+  .apple-blur {
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    background-color: rgba(255, 255, 255, 0.85);
+  }
+  
+  .gradient-bg {
+    background: radial-gradient(circle at 50% 0%, #FFFFFF 0%, #F5F5F7 100%);
+  }
+  
+  .material-symbols-outlined {
+    font-family: "Material Symbols Outlined";
+    font-weight: normal;
+    font-style: normal;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    -moz-osx-font-smoothing: grayscale;
+    font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+  }
+
+  html:not(.mat-icons-ready) .material-symbols-outlined {
+    opacity: 0;
+  }
+  
+  .font-variation-fill-1 {
+    font-variation-settings: 'FILL' 1;
+  }
+  
+  .icon-3d-effect {
+    box-shadow: 
+      inset 0 1px 1px rgba(255, 255, 255, 0.8),
+      0 4px 12px rgba(0, 0, 0, 0.05);
+  }
+}
