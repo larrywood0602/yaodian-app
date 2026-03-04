@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Sparkles, Download, RefreshCw, Type, Layout, Palette, ChevronRight, Wand2, Check, Image as ImageIcon, FileText, Presentation, Target, Database, BookmarkPlus } from 'lucide-react';
-import { analyzeText, regenerateSection, diagnoseConnection } from './services/gemini';
+import { analyzeText, regenerateSection, diagnoseConnection, normalizeInfographicData } from './services/gemini';
 import { InfographicData, KnowledgeCard } from './types';
 import { InfographicRenderer, SectionRenderer } from './components/InfographicRenderer';
 import { COLOR_PALETTES } from './constants';
@@ -32,17 +32,17 @@ const DEFAULT_THEME = {
   text: '#1D1D1F',
 };
 
-const normalizeReportData = (data: any): InfographicData => ({
-  title: String(data?.title || '未命名报告'),
-  subtitle: data?.subtitle ? String(data.subtitle) : '',
-  sections: Array.isArray(data?.sections) ? data.sections : [],
-  suggested_theme: {
-    primary: data?.suggested_theme?.primary || DEFAULT_THEME.primary,
-    secondary: data?.suggested_theme?.secondary || DEFAULT_THEME.secondary,
-    background: data?.suggested_theme?.background || DEFAULT_THEME.background,
-    text: data?.suggested_theme?.text || DEFAULT_THEME.text,
-  },
-});
+const normalizeReportData = (data: any, kind: 'visual' | 'strategic'): InfographicData => {
+  try {
+    return normalizeInfographicData(data, kind);
+  } catch {
+    return {
+      title: kind === 'visual' ? '可视化报告' : '战略洞察报告',
+      sections: [],
+      suggested_theme: DEFAULT_THEME,
+    };
+  }
+};
 
 export default function App() {
   const [input, setInput] = useState('');
@@ -354,30 +354,26 @@ export default function App() {
         analysisTarget, 
         (partialVisual) => {
           if (partialVisual && Array.isArray(partialVisual.sections)) {
-            setVisualData(prev => {
-              return normalizeReportData(partialVisual);
-            });
+            setVisualData(normalizeReportData(partialVisual, 'visual'));
           }
         },
         (partialStrategic) => {
           setGenerationStage('deep-dive');
           if (partialStrategic && Array.isArray(partialStrategic.sections)) {
-            setStrategicData(prev => {
-              return normalizeReportData(partialStrategic);
-            });
+            setStrategicData(normalizeReportData(partialStrategic, 'strategic'));
           }
         },
         (finalVisual) => {
           // Visual stage complete - allow user to see the report
-          setVisualData(normalizeReportData(finalVisual));
+          setVisualData(normalizeReportData(finalVisual, 'visual'));
           setGenerationStage('deep-dive');
         },
         useWebSearch,
         (data) => setSearchData(data)
       );
 
-      const safeVisual = normalizeReportData(result?.visual);
-      const safeStrategic = normalizeReportData(result?.strategic);
+      const safeVisual = normalizeReportData(result.visual, 'visual');
+      const safeStrategic = normalizeReportData(result.strategic, 'strategic');
 
       setVisualData(safeVisual);
       setStrategicData(safeStrategic);
@@ -386,7 +382,7 @@ export default function App() {
       const newCard = {
         id: Date.now(),
         title: safeVisual.title,
-        summary: safeVisual.subtitle || safeVisual.sections?.[0]?.section_title || '未命名摘要',
+        summary: safeVisual.subtitle || safeVisual.sections[0]?.section_title || '未命名摘要',
         date: new Date().toISOString(),
         tags: [analysisTarget],
         data: safeVisual,
@@ -402,10 +398,7 @@ export default function App() {
         particleCount: 100,
         spread: 70,
         origin: { y: 0.6 },
-        colors: [
-          safeVisual.suggested_theme.primary || '#007AFF',
-          safeVisual.suggested_theme.secondary || '#86868B'
-        ]
+        colors: [safeVisual.suggested_theme.primary, safeVisual.suggested_theme.secondary]
       });
     } catch (err: any) {
       const is503 = err?.message?.includes('503') || err?.message?.includes('UNAVAILABLE');
@@ -460,9 +453,9 @@ export default function App() {
       newSections[index] = newSection;
       
       if (activeReportType === 'visual') {
-        setVisualData({ ...currentData, sections: newSections });
+        setVisualData(normalizeReportData({ ...currentData, sections: newSections }, 'visual'));
       } else {
-        setStrategicData({ ...currentData, sections: newSections });
+        setStrategicData(normalizeReportData({ ...currentData, sections: newSections }, 'strategic'));
       }
     } catch (err) {
       console.error('Regenerate section failed:', err);
@@ -543,18 +536,18 @@ export default function App() {
 
   const handleThemeChange = (theme: any) => {
     if (activeReportType === 'visual' && visualData) {
-      setVisualData({ ...visualData, suggested_theme: theme });
+      setVisualData(normalizeReportData({ ...visualData, suggested_theme: theme }, 'visual'));
     } else if (activeReportType === 'strategic' && strategicData) {
-      setStrategicData({ ...strategicData, suggested_theme: theme });
+      setStrategicData(normalizeReportData({ ...strategicData, suggested_theme: theme }, 'strategic'));
     }
     setShowThemeSelector(false);
   };
 
   const handleDataUpdate = (newData: InfographicData) => {
     if (activeReportType === 'visual') {
-      setVisualData(newData);
+      setVisualData(normalizeReportData(newData, 'visual'));
     } else {
-      setStrategicData(newData);
+      setStrategicData(normalizeReportData(newData, 'strategic'));
     }
   };
 
@@ -910,7 +903,12 @@ export default function App() {
                           className={`bg-white rounded-[2rem] apple-shadow border border-white hover:scale-[1.01] transition-all cursor-pointer group flex relative overflow-hidden ${
                             historyViewMode === 'grid' ? 'p-8 flex-col h-full' : 'p-6 items-center gap-6'
                           }`}
-                          onClick={() => { setVisualData(card.data); setStrategicData(card.strategicData); setActiveReportType('visual'); setActiveTab('generate'); }}
+                          onClick={() => {
+                            setVisualData(normalizeReportData(card.data, 'visual'));
+                            setStrategicData(normalizeReportData(card.strategicData || card.data, 'strategic'));
+                            setActiveReportType('visual');
+                            setActiveTab('generate');
+                          }}
                         >
                           <div className={`flex-1 ${historyViewMode === 'list' ? 'flex items-center gap-6' : ''}`}>
                             <div className={historyViewMode === 'grid' ? "flex gap-2 mb-6" : "flex gap-2 shrink-0"}>
@@ -1089,8 +1087,12 @@ export default function App() {
                                 <button 
                                   onClick={() => {
                                     if (selectedInfobaseCard.source_report_data) {
-                                      setVisualData(selectedInfobaseCard.source_report_data);
-                                      setStrategicData(selectedInfobaseCard.source_report_data);
+                                      setVisualData(
+                                        normalizeReportData(selectedInfobaseCard.source_report_data, 'visual')
+                                      );
+                                      setStrategicData(
+                                        normalizeReportData(selectedInfobaseCard.source_report_data, 'strategic')
+                                      );
                                       setActiveTab('generate');
                                       setSelectedInfobaseCard(null);
                                     }

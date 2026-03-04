@@ -48,6 +48,59 @@ interface Props {
   onUpdate?: (data: InfographicData) => void;
 }
 
+const CHART_LOGIC_TYPES = new Set<LogicType>([
+  LogicType.BAR,
+  LogicType.HORIZONTAL_BAR,
+  LogicType.LINE,
+  LogicType.AREA,
+  LogicType.PIE,
+  LogicType.DONUT,
+  LogicType.COMBO_CHART,
+  LogicType.RADAR_CHART,
+  LogicType.SCATTER,
+  LogicType.WATERFALL,
+  LogicType.GAUGE,
+  LogicType.STACKED_LINE,
+  LogicType.STACKED_AREA,
+  LogicType.NIGHTINGALE_ROSE,
+  LogicType.RADIAL_BAR,
+]);
+
+const LOGIC_ALIAS_MAP: Record<string, LogicType> = {
+  BAR_CHART: LogicType.BAR,
+  BARCHART: LogicType.BAR,
+  LINE_CHART: LogicType.LINE,
+  LINECHART: LogicType.LINE,
+  PIE_CHART: LogicType.PIE,
+  PIECHART: LogicType.PIE,
+  DONUT_CHART: LogicType.DONUT,
+  RADAR_CHARTS: LogicType.RADAR_CHART,
+  RADARCHART: LogicType.RADAR_CHART,
+  ROAD_MAP: LogicType.ROADMAP,
+  ROADMAP_CHART: LogicType.ROADMAP,
+  TIMELINE_CHART: LogicType.TIMELINE,
+  HORIZONTALBAR: LogicType.HORIZONTAL_BAR,
+  HORIZONTAL_BAR_CHART: LogicType.HORIZONTAL_BAR,
+  BENTO_GRID_LAYOUT: LogicType.BENTO_GRID,
+};
+
+function parseNumeric(value: unknown): number | null {
+  const raw = String(value ?? "").replace(/,/g, "").replace(/[^\d.+-]/g, "");
+  if (!raw) return null;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeRenderLogicType(input: unknown): LogicType {
+  const raw = String(input || "")
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+  if ((Object.values(LogicType) as string[]).includes(raw)) {
+    return raw as LogicType;
+  }
+  return LOGIC_ALIAS_MAP[raw] || LogicType.PARALLEL;
+}
+
 export const SectionRenderer = ({ 
   section, 
   theme, 
@@ -84,12 +137,19 @@ export const SectionRenderer = ({
     const data = { ...section, suggested_theme: theme } as any; 
     
     // Basic fallback/correction logic
-    let effectiveLogicType = section.logic_type;
-    if (section.logic_type === LogicType.PIE && section.nodes.length > 6) {
+    let effectiveLogicType = normalizeRenderLogicType(section.logic_type);
+    if (effectiveLogicType === LogicType.PIE && section.nodes.length > 6) {
       effectiveLogicType = LogicType.HORIZONTAL_BAR;
     }
-    if (section.logic_type === LogicType.BAR && section.nodes.some(n => n.title.length > 15)) {
+    if (effectiveLogicType === LogicType.BAR && section.nodes.some(n => n.title.length > 15)) {
       effectiveLogicType = LogicType.HORIZONTAL_BAR;
+    }
+    const hasNumeric = section.nodes.some((node) => parseNumeric(node.value) != null);
+    const hasCells = section.nodes.some(
+      (node) => Array.isArray((node as any).cells) && (node as any).cells.length > 0
+    );
+    if (!hasNumeric && !hasCells && CHART_LOGIC_TYPES.has(effectiveLogicType)) {
+      effectiveLogicType = LogicType.PARALLEL;
     }
 
     const props = { 
