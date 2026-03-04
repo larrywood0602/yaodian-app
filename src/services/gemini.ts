@@ -1,4 +1,4 @@
-import { InfographicData } from "../types";
+import { InfographicData, LogicType } from "../types";
 import { assertNativeApiBaseUrl, buildApiUrl, getApiBaseUrl } from "./apiBase";
 import { requestJson } from "./httpClient";
 
@@ -17,6 +17,10 @@ export interface ConnectionDiagnostics {
   memfireMessage: string;
 }
 
+const HEALTH_TIMEOUT_MS = 8000;
+const ANALYZE_TIMEOUT_MS = 240000;
+const REGENERATE_TIMEOUT_MS = 120000;
+
 function normalizeTheme(theme: any) {
   return {
     primary: String(theme?.primary || "#007AFF"),
@@ -27,18 +31,95 @@ function normalizeTheme(theme: any) {
 }
 
 function validateInfographicData(payload: any, label: "visual" | "strategic"): InfographicData {
-  const sections = Array.isArray(payload?.sections) ? payload.sections : null;
-  if (!sections) {
-    const keys = payload && typeof payload === "object" ? Object.keys(payload).slice(0, 10).join(", ") : String(payload);
-    throw new Error(
-      `后端返回的${label}数据结构不符合前端协议（缺少 sections 数组）。当前字段: ${keys}`
-    );
-  }
+  const asText = (value: any) => {
+    if (value == null) return "";
+    if (typeof value === "string") return value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  };
+
+  const normalizeNodes = (nodes: any[]) => {
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+      return [{ title: "提示", content: "暂无可渲染内容，请重试。"}];
+    }
+    return nodes.map((node: any, index: number) => {
+      if (node && typeof node === "object") {
+        return {
+          title: asText(node.title || node.name || `要点 ${index + 1}`) || `要点 ${index + 1}`,
+          content: asText(node.content || node.description || node.text || "暂无详细内容") || "暂无详细内容",
+          ...(node.value != null ? { value: asText(node.value) } : {}),
+          ...(node.icon ? { icon: asText(node.icon) } : {}),
+          ...(node.color ? { color: asText(node.color) } : {}),
+          ...(Array.isArray(node.cells) ? { cells: node.cells.map((cell: any) => asText(cell)) } : {}),
+        };
+      }
+      return {
+        title: `要点 ${index + 1}`,
+        content: asText(node) || "暂无详细内容",
+      };
+    });
+  };
+
+  const rawSections = Array.isArray(payload?.sections)
+    ? payload.sections
+    : Array.isArray(payload?.blocks)
+      ? payload.blocks
+      : Array.isArray(payload?.modules)
+        ? payload.modules
+        : [];
+
+  const sections = rawSections
+    .map((section: any, index: number) => {
+      if (!section || typeof section !== "object") {
+        return {
+          logic_type: LogicType.PARALLEL,
+          template_id: `fallback_${index + 1}`,
+          section_title: `模块 ${index + 1}`,
+          visual_intent: "summary",
+          density: "medium" as const,
+          nodes: normalizeNodes([section]),
+        };
+      }
+      return {
+        logic_type: (section.logic_type || LogicType.PARALLEL) as LogicType,
+        template_id: asText(section.template_id || section.template || `section_${index + 1}`),
+        section_title: asText(section.section_title || section.title || `模块 ${index + 1}`),
+        visual_intent: asText(section.visual_intent || section.intent || "summary"),
+        density:
+          section.density === "low" || section.density === "high" || section.density === "medium"
+            ? section.density
+            : ("medium" as const),
+        nodes: normalizeNodes(section.nodes || section.items || section.points || []),
+      };
+    })
+    .filter((section) => Array.isArray(section.nodes) && section.nodes.length > 0);
+
+  const safeSections = sections.length
+    ? sections
+    : [
+        {
+          logic_type: LogicType.HERO,
+          template_id: "empty_fallback",
+          section_title: "结果摘要",
+          visual_intent: "summary",
+          density: "medium" as const,
+          nodes: normalizeNodes([
+            {
+              title: "提示",
+              content: asText(payload?.summary || payload?.report_meta?.summary || payload) || "返回结果为空，请重试。",
+            },
+          ]),
+        },
+      ];
 
   return {
     title: String(payload?.title || (label === "visual" ? "可视化报告" : "战略洞察报告")),
     subtitle: payload?.subtitle ? String(payload.subtitle) : "",
-    sections,
+    sections: safeSections as any,
     suggested_theme: normalizeTheme(payload?.suggested_theme),
   };
 }
@@ -67,7 +148,7 @@ export async function diagnoseConnection(): Promise<ConnectionDiagnostics> {
   }
 
   try {
-    const apiRes = await requestJson(buildApiUrl("/api/health"), { timeoutMs: 5000 });
+    const apiRes = await requestJson(buildApiUrl("/api/health"), { timeoutMs: HEALTH_TIMEOUT_MS });
     const apiData = apiRes.data as any;
     apiReachable = apiRes.ok;
     apiMessage = apiRes.ok
@@ -90,7 +171,7 @@ export async function diagnoseConnection(): Promise<ConnectionDiagnostics> {
   }
 
   try {
-    const qwenRes = await requestJson(buildApiUrl("/api/qwen/health"), { timeoutMs: 5000 });
+    const qwenRes = await requestJson(buildApiUrl("/api/qwen/health"), { timeoutMs: HEALTH_TIMEOUT_MS });
     const qwenData = qwenRes.data as any;
     qwenReachable = qwenRes.ok && Boolean(qwenData?.ok);
     qwenMessage = qwenReachable
@@ -101,7 +182,7 @@ export async function diagnoseConnection(): Promise<ConnectionDiagnostics> {
   }
 
   try {
-    const memRes = await requestJson(buildApiUrl("/api/memfire/health"), { timeoutMs: 5000 });
+    const memRes = await requestJson(buildApiUrl("/api/memfire/health"), { timeoutMs: HEALTH_TIMEOUT_MS });
     const memData = memRes.data as any;
     memfireReachable = memRes.ok && Boolean(memData?.ok);
     if (memfireReachable) {
@@ -140,6 +221,7 @@ export async function analyzeText(
   const response = await requestJson(buildApiUrl("/api/analyze"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    timeoutMs: ANALYZE_TIMEOUT_MS,
     body: {
       text,
       analysisTarget,
@@ -149,6 +231,12 @@ export async function analyzeText(
 
   if (!response.ok) {
     const data = response.data as any;
+    if (response.status === 504) {
+      throw new Error("服务器处理超时（504），请稍后重试或减少输入内容。");
+    }
+    if (typeof data === "string" && data.trim()) {
+      throw new Error(`Analyze failed: ${response.status} ${data.slice(0, 180)}`);
+    }
     throw new Error(data?.error || `Analyze failed: ${response.status}`);
   }
 
@@ -175,6 +263,7 @@ export async function regenerateSection(
   const response = await requestJson(buildApiUrl("/api/regenerate"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    timeoutMs: REGENERATE_TIMEOUT_MS,
     body: {
       sectionTitle,
       nodes,
@@ -183,6 +272,12 @@ export async function regenerateSection(
 
   if (!response.ok) {
     const data = response.data as any;
+    if (response.status === 504) {
+      throw new Error("重生成超时（504），请重试。");
+    }
+    if (typeof data === "string" && data.trim()) {
+      throw new Error(`Regenerate failed: ${response.status} ${data.slice(0, 180)}`);
+    }
     throw new Error(data?.error || `Regenerate failed: ${response.status}`);
   }
 

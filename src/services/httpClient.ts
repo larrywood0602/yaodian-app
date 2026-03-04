@@ -13,7 +13,22 @@ export interface JsonResponse<T = any> {
   data: T;
 }
 
-const DEFAULT_TIMEOUT_MS = 10000;
+const DEFAULT_TIMEOUT_MS = 30000;
+
+function isTimeoutError(error: any) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return (
+    error?.name === "AbortError" ||
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("aborted")
+  );
+}
+
+function formatError(error: any) {
+  const code = error?.code ? `[${String(error.code)}] ` : "";
+  return `${code}${String(error?.message || error)}`;
+}
 
 function parseMaybeJson(value: any) {
   if (typeof value === "string") {
@@ -44,11 +59,16 @@ export async function requestJson<T = any>(
         data: options.body,
         connectTimeout: timeoutMs,
         readTimeout: timeoutMs,
-        responseType: "json",
+        // Keep text mode so non-JSON upstream errors (e.g. nginx 504 html)
+        // are still returned with HTTP status instead of parsing exceptions.
+        responseType: "text",
       });
     } catch (error: any) {
+      if (isTimeoutError(error)) {
+        throw new Error(`Native HTTP ${method} ${url} 超时（${timeoutMs}ms）`);
+      }
       throw new Error(
-        `Native HTTP ${method} ${url} 失败: ${String(error?.message || error)}`
+        `Native HTTP ${method} ${url} 失败: ${formatError(error)}`
       );
     }
 
@@ -75,7 +95,10 @@ export async function requestJson<T = any>(
       data: data as T,
     };
   } catch (error: any) {
-    throw new Error(`HTTP ${method} ${url} 失败: ${String(error?.message || error)}`);
+    if (isTimeoutError(error)) {
+      throw new Error(`HTTP ${method} ${url} 超时（${timeoutMs}ms）`);
+    }
+    throw new Error(`HTTP ${method} ${url} 失败: ${formatError(error)}`);
   } finally {
     clearTimeout(timer);
   }

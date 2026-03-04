@@ -413,10 +413,15 @@ export default function App() {
         setError('当前 AI 模型访问量过大，请稍后重试。');
       } else {
         let detail = String(err?.message || '').trim();
-        if (!detail || detail === 'Failed to fetch' || detail.includes('NetworkError')) {
+        const isTimeoutError = /timeout|timed out|超时/i.test(detail);
+        if (!detail || detail === 'Failed to fetch' || detail.includes('NetworkError') || isTimeoutError) {
           try {
             const d = await diagnoseConnection();
-            detail = `API地址: ${d.apiBaseUrl}\n${d.apiMessage}\n${d.qwenMessage}\n${d.memfireMessage}`;
+            if (isTimeoutError) {
+              detail = `请求超时：${detail}\n\nAPI地址: ${d.apiBaseUrl}\n${d.apiMessage}\n${d.qwenMessage}\n${d.memfireMessage}\n建议：网络较慢时可重试，或减少输入内容长度。`;
+            } else {
+              detail = `API地址: ${d.apiBaseUrl}\n${d.apiMessage}\n${d.qwenMessage}\n${d.memfireMessage}`;
+            }
           } catch (diagErr: any) {
             detail = `连接检查失败：${String(diagErr?.message || diagErr)}`;
           }

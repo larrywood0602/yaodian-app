@@ -37,6 +37,20 @@ const QWEN_API_KEY = process.env.QWEN_API_KEY || "";
 const QWEN_BASE_URL =
   process.env.QWEN_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const QWEN_MODEL = process.env.QWEN_MODEL || "qwen3.5-plus";
+const QWEN_REQUEST_TIMEOUT_MS = Number(process.env.QWEN_REQUEST_TIMEOUT_MS || 120000);
+const ANALYZE_TIMEOUT_MS = Number(process.env.ANALYZE_TIMEOUT_MS || 240000);
+const QWEN_MAX_TOKENS = Number(process.env.QWEN_MAX_TOKENS || 1400);
+const VISUAL_SECTION_LIMIT = Number(process.env.VISUAL_SECTION_LIMIT || 4);
+const STRATEGIC_SECTION_LIMIT = Number(process.env.STRATEGIC_SECTION_LIMIT || 4);
+const QWEN_ENABLE_THINKING =
+  String(process.env.QWEN_ENABLE_THINKING || "false").toLowerCase() === "true";
+const ANALYZE_FAST_MODE =
+  String(process.env.ANALYZE_FAST_MODE || "true").toLowerCase() === "true";
+const ANALYZE_FAST_MAX_TOKENS = Number(process.env.ANALYZE_FAST_MAX_TOKENS || 450);
+const ANALYZE_FAST_VISUAL_SECTION_LIMIT = Number(process.env.ANALYZE_FAST_VISUAL_SECTION_LIMIT || 2);
+const ANALYZE_FAST_STRATEGIC_SECTION_LIMIT = Number(
+  process.env.ANALYZE_FAST_STRATEGIC_SECTION_LIMIT || 2
+);
 
 const VISUAL_SYSTEM_INSTRUCTION = `你是一位顶级的数据可视化专家与交互式报告设计师，擅长复刻 Gemini 和 Chronicle 的专业动态布局风格。
 你的任务是：
@@ -69,6 +83,339 @@ const STRATEGIC_SYSTEM_INSTRUCTION = `你是一位顶级的战略咨询顾问与
    - 模拟 Gemini 的 Visual Layout，通过不同尺寸的 Bento 块创造沉浸式阅读体验。
 输出格式：纯 JSON。`;
 
+const DUAL_REPORT_SYSTEM_INSTRUCTION = `你是企业数据分析与战略可视化助手。
+任务：根据用户输入，一次性输出两个报告对象 visual 与 strategic。
+必须返回纯 JSON，对象结构固定如下：
+{
+  "visual": { "title": "...", "subtitle": "...", "suggested_theme": {...}, "sections": [...] },
+  "strategic": { "title": "...", "subtitle": "...", "suggested_theme": {...}, "sections": [...] }
+}
+
+严格规则：
+1) 只输出 JSON，不要解释文字；
+2) visual 与 strategic 都必须有 sections 数组；
+3) 每个 sections 的元素都必须包含 logic_type/template_id/section_title/nodes；
+4) 每个 nodes 元素至少包含 title/content；
+5) 每个报告 sections 数量控制在 3-4，每个 section 的 nodes 数量控制在 2-5。`;
+
+const DEFAULT_THEME = {
+  primary: "#007AFF",
+  secondary: "#86868B",
+  background: "#F5F5F7",
+  text: "#1D1D1F",
+};
+
+const LOGIC_TYPE_VALUES = new Set([
+  "PROGRESSIVE",
+  "PARALLEL",
+  "CORE",
+  "CONTRAST",
+  "HIERARCHY",
+  "TIMELINE",
+  "SWOT",
+  "FUNNEL",
+  "GRID",
+  "CYCLE",
+  "MINDMAP",
+  "PYRAMID",
+  "VENN",
+  "RADAR",
+  "BENTO",
+  "STEP",
+  "GEAR",
+  "RIBBON",
+  "HONEYCOMB",
+  "PILL",
+  "BAR",
+  "LINE",
+  "PIE",
+  "RANKING",
+  "RADIAL_BAR",
+  "TABLE",
+  "COMBO_CHART",
+  "DONUT",
+  "AREA",
+  "SCATTER",
+  "WATERFALL",
+  "GAUGE",
+  "RADAR_CHART",
+  "STACKED_LINE",
+  "STACKED_AREA",
+  "HORIZONTAL_BAR",
+  "NIGHTINGALE_ROSE",
+  "MATRIX",
+  "ROADMAP",
+  "INSIGHT",
+  "COMPARISON",
+  "BENTO_GRID",
+  "HERO",
+  "ADAPTIVE_GRID",
+]);
+
+const LOGIC_TYPE_ALIASES = {
+  TIMELINE_CHART: "TIMELINE",
+  ROAD_MAP: "ROADMAP",
+  ROADMAP_CHART: "ROADMAP",
+  BARCHART: "BAR",
+  LINECHART: "LINE",
+  PIECHART: "PIE",
+  HORIZONTALBAR: "HORIZONTAL_BAR",
+  RADIALBAR: "RADIAL_BAR",
+  RADARCHART: "RADAR_CHART",
+  STACKEDLINE: "STACKED_LINE",
+  STACKEDAREA: "STACKED_AREA",
+  BENTOGRID: "BENTO_GRID",
+};
+
+function toText(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function normalizeLogicType(input) {
+  const raw = String(input || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+  const mapped = LOGIC_TYPE_ALIASES[raw] || raw;
+  return LOGIC_TYPE_VALUES.has(mapped) ? mapped : "PARALLEL";
+}
+
+function normalizeTheme(themeInput) {
+  const theme = themeInput && typeof themeInput === "object" ? themeInput : {};
+  return {
+    primary: toText(theme.primary) || DEFAULT_THEME.primary,
+    secondary: toText(theme.secondary) || DEFAULT_THEME.secondary,
+    background: toText(theme.background) || DEFAULT_THEME.background,
+    text: toText(theme.text) || DEFAULT_THEME.text,
+  };
+}
+
+function normalizeNodes(nodesInput) {
+  const nodes = Array.isArray(nodesInput) ? nodesInput : [];
+  const normalized = nodes
+    .map((node, index) => {
+      if (node && typeof node === "object") {
+        const title = toText(node.title || node.name || node.label || `要点 ${index + 1}`);
+        const content = toText(
+          node.content ||
+            node.description ||
+            node.desc ||
+            node.text ||
+            node.summary ||
+            node.detail
+        );
+        const value = node.value != null ? toText(node.value) : undefined;
+        const icon = node.icon != null ? toText(node.icon) : undefined;
+        const color = node.color != null ? toText(node.color) : undefined;
+        const cells = Array.isArray(node.cells)
+          ? node.cells.map((cell) => toText(cell))
+          : undefined;
+        return {
+          title: title || `要点 ${index + 1}`,
+          content: content || "暂无详细内容",
+          ...(value ? { value } : {}),
+          ...(icon ? { icon } : {}),
+          ...(color ? { color } : {}),
+          ...(cells && cells.length ? { cells } : {}),
+        };
+      }
+      return {
+        title: `要点 ${index + 1}`,
+        content: toText(node) || "暂无详细内容",
+      };
+    })
+    .filter((node) => node.title || node.content)
+    .slice(0, 10);
+
+  return normalized.length
+    ? normalized
+    : [{ title: "核心结论", content: "当前返回结果缺少可渲染节点，建议重试生成。" }];
+}
+
+function normalizeSections(sectionsInput, sectionLimit) {
+  const sections = Array.isArray(sectionsInput) ? sectionsInput : [];
+  return sections
+    .map((section, index) => {
+      if (!section || typeof section !== "object") {
+        return {
+          logic_type: "PARALLEL",
+          template_id: `section_${index + 1}`,
+          section_title: `模块 ${index + 1}`,
+          visual_intent: "summary",
+          density: "medium",
+          nodes: normalizeNodes([section]),
+        };
+      }
+      return {
+        logic_type: normalizeLogicType(section.logic_type || section.type),
+        template_id: toText(section.template_id || section.template || `section_${index + 1}`),
+        section_title: toText(
+          section.section_title || section.title || section.name || `模块 ${index + 1}`
+        ),
+        visual_intent: toText(section.visual_intent || section.intent || "summary"),
+        density: ["low", "medium", "high"].includes(String(section.density))
+          ? String(section.density)
+          : "medium",
+        nodes: normalizeNodes(section.nodes || section.items || section.points),
+      };
+    })
+    .filter((section) => Array.isArray(section.nodes) && section.nodes.length > 0)
+    .slice(0, sectionLimit);
+}
+
+function legacySectionsFromPayload(payload, sectionLimit) {
+  const sources = [
+    payload?.blocks,
+    payload?.modules,
+    payload?.cards,
+    payload?.slides,
+    payload?.items,
+  ];
+  for (const source of sources) {
+    const normalized = normalizeSections(source, sectionLimit);
+    if (normalized.length) return normalized;
+  }
+
+  // If model returned meta-style object, convert top-level fields into one section.
+  const fallbackText = [
+    toText(payload?.summary),
+    toText(payload?.report_meta?.summary),
+    toText(payload?.analysis),
+    toText(payload?.insight),
+    toText(payload?.conclusion),
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  if (fallbackText) {
+    return [
+      {
+        logic_type: "HERO",
+        template_id: "hero_fallback",
+        section_title: "执行摘要",
+        visual_intent: "summary",
+        density: "medium",
+        nodes: normalizeNodes([{ title: "核心摘要", content: fallbackText }]),
+      },
+    ];
+  }
+
+  return [];
+}
+
+function normalizeReportPayload(payload, label, sectionLimit) {
+  const safe = payload && typeof payload === "object" ? payload : {};
+  const title = toText(safe.title || safe.report_meta?.title) || (label === "visual" ? "可视化报告" : "战略洞察报告");
+  const subtitle = toText(safe.subtitle || safe.report_meta?.subtitle || safe.report_meta?.summary);
+  const suggested_theme = normalizeTheme(safe.suggested_theme || safe.theme);
+  let sections = normalizeSections(safe.sections, sectionLimit);
+  if (!sections.length) {
+    sections = legacySectionsFromPayload(safe, sectionLimit);
+  }
+  if (!sections.length) {
+    sections = [
+      {
+        logic_type: "HERO",
+        template_id: "empty_fallback",
+        section_title: "结果摘要",
+        visual_intent: "summary",
+        density: "medium",
+        nodes: normalizeNodes([
+          {
+            title: "提示",
+            content: "模型返回内容为空或格式不兼容，请重试或缩短输入内容。",
+          },
+        ]),
+      },
+    ];
+  }
+  return { title, subtitle, suggested_theme, sections };
+}
+
+function safeParseReportJson(text, label, sectionLimit) {
+  try {
+    const parsed = JSON.parse(text || "{}");
+    return normalizeReportPayload(parsed, label, sectionLimit);
+  } catch {
+    return normalizeReportPayload({ summary: toText(text) }, label, sectionLimit);
+  }
+}
+
+function strategicFromVisual(visual, sectionLimit = STRATEGIC_SECTION_LIMIT) {
+  const insightNodes = (visual.sections || [])
+    .slice(0, 3)
+    .map((section, idx) => ({
+      title: section.section_title || `洞察 ${idx + 1}`,
+      content: toText(section.nodes?.[0]?.content || section.nodes?.[0]?.title || "关注关键指标变化"),
+    }));
+
+  return normalizeReportPayload(
+    {
+      title: `${visual.title} - 战略洞察`,
+      subtitle: "基于可视化结果自动提炼",
+      suggested_theme: visual.suggested_theme,
+      sections: [
+        {
+          logic_type: "INSIGHT",
+          template_id: "strategic_insight",
+          section_title: "关键洞察",
+          visual_intent: "insight",
+          density: "medium",
+          nodes: insightNodes.length
+            ? insightNodes
+            : [{ title: "核心洞察", content: "建议从营收、利润与区域结构三维度复盘。" }],
+        },
+        {
+          logic_type: "ROADMAP",
+          template_id: "strategic_roadmap",
+          section_title: "行动路线图",
+          visual_intent: "roadmap",
+          density: "medium",
+          nodes: [
+            { title: "短期（1-2周）", content: "聚焦核心指标异常点，完成业务归因。" },
+            { title: "中期（1-2月）", content: "围绕高增长区域优化资源投入与转化效率。" },
+            { title: "长期（1个季度）", content: "建立可复用的数据看板与策略复盘机制。" },
+          ],
+        },
+      ],
+    },
+    "strategic",
+    sectionLimit
+  );
+}
+
+function safeParseDualReportJson(
+  text,
+  visualSectionLimit = VISUAL_SECTION_LIMIT,
+  strategicSectionLimit = STRATEGIC_SECTION_LIMIT
+) {
+  try {
+    const parsed = JSON.parse(text || "{}");
+    const visualCandidate =
+      parsed?.visual || parsed?.data?.visual || parsed?.report?.visual || parsed?.result?.visual;
+    const strategicCandidate =
+      parsed?.strategic || parsed?.data?.strategic || parsed?.report?.strategic || parsed?.result?.strategic;
+
+    const visual = normalizeReportPayload(
+      visualCandidate || parsed,
+      "visual",
+      visualSectionLimit
+    );
+    const strategic = strategicCandidate
+      ? normalizeReportPayload(strategicCandidate, "strategic", strategicSectionLimit)
+      : strategicFromVisual(visual, strategicSectionLimit);
+    return { visual, strategic };
+  } catch {
+    const visual = safeParseReportJson(text, "visual", visualSectionLimit);
+    const strategic = strategicFromVisual(visual, strategicSectionLimit);
+    return { visual, strategic };
+  }
+}
+
 function extractJson(content) {
   const trimmed = String(content || "").trim();
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -85,29 +432,76 @@ function isRetryable(error) {
   );
 }
 
-async function qwenChat(prompt, systemInstruction) {
+function createTimeoutError(label, timeoutMs) {
+  const error = new Error(`${label} timed out after ${timeoutMs}ms`);
+  error.status = 504;
+  return error;
+}
+
+async function fetchWithTimeout(url, init, timeoutMs, label) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw createTimeoutError(label, timeoutMs);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function withTimeout(taskFn, timeoutMs, label) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      taskFn(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(createTimeoutError(label, timeoutMs)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function qwenChat(prompt, systemInstruction, options = {}) {
   if (!QWEN_API_KEY) {
     throw new Error("QWEN_API_KEY is missing on server");
   }
+  const maxTokens = Number(options.maxTokens || QWEN_MAX_TOKENS);
 
-  const response = await fetch(`${QWEN_BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${QWEN_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: QWEN_MODEL,
-      messages: [
-        {
-          role: "system",
-          content: `${systemInstruction}\n请严格输出 JSON，不要输出解释文本。`,
+  const response = await fetchWithTimeout(
+    `${QWEN_BASE_URL}/chat/completions`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${QWEN_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: QWEN_MODEL,
+        messages: [
+          {
+            role: "system",
+            content: `${systemInstruction}\n请严格输出 JSON，不要输出解释文本。`,
+          },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.2,
+        max_tokens: maxTokens,
+        extra_body: {
+          enable_thinking: QWEN_ENABLE_THINKING,
         },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.2,
-    }),
-  });
+      }),
+    },
+    QWEN_REQUEST_TIMEOUT_MS,
+    "Qwen chat"
+  );
 
   if (!response.ok) {
     let errorMessage = response.statusText;
@@ -128,12 +522,12 @@ async function qwenChat(prompt, systemInstruction) {
   return extractJson(content);
 }
 
-async function generateWithRetry(prompt, systemInstruction) {
+async function generateWithRetry(prompt, systemInstruction, options = {}) {
   let attempt = 0;
   const maxRetries = 3;
   while (attempt < maxRetries) {
     try {
-      return await qwenChat(prompt, systemInstruction);
+      return await qwenChat(prompt, systemInstruction, options);
     } catch (error) {
       attempt += 1;
       if (isRetryable(error) && attempt < maxRetries) {
@@ -165,26 +559,32 @@ async function searchWebData(query, target) {
   
 请直接输出事实汇总，无需多余解释。`;
 
-  const response = await fetch(`${QWEN_BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${QWEN_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: QWEN_MODEL,
-      messages: [
-        {
-          role: "system",
-          content: "你是一个具备联网搜索能力的专业助手。请通过搜索提供准确、实时的商业和技术数据。",
-        },
-        { role: "user", content: prompt },
-      ],
-      extra_body: {
-        enable_search: true,
+  const response = await fetchWithTimeout(
+    `${QWEN_BASE_URL}/chat/completions`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${QWEN_API_KEY}`,
       },
-    }),
-  });
+      body: JSON.stringify({
+        model: QWEN_MODEL,
+        messages: [
+          {
+            role: "system",
+            content: "你是一个具备联网搜索能力的专业助手。请通过搜索提供准确、实时的商业和技术数据。",
+          },
+          { role: "user", content: prompt },
+        ],
+        extra_body: {
+          enable_thinking: QWEN_ENABLE_THINKING,
+          enable_search: true,
+        },
+      }),
+    },
+    QWEN_REQUEST_TIMEOUT_MS,
+    "Qwen search"
+  );
 
   if (!response.ok) {
     let errorMessage = response.statusText;
@@ -225,19 +625,27 @@ app.get("/api/qwen/health", async (_req, res) => {
       });
     }
 
-    const response = await fetch(`${QWEN_BASE_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${QWEN_API_KEY}`,
+    const response = await fetchWithTimeout(
+      `${QWEN_BASE_URL}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${QWEN_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: QWEN_MODEL,
+          messages: [{ role: "user", content: "ping" }],
+          max_tokens: 1,
+          temperature: 0,
+          extra_body: {
+            enable_thinking: false,
+          },
+        }),
       },
-      body: JSON.stringify({
-        model: QWEN_MODEL,
-        messages: [{ role: "user", content: "ping" }],
-        max_tokens: 1,
-        temperature: 0,
-      }),
-    });
+      30000,
+      "Qwen health check"
+    );
 
     if (!response.ok) {
       let errorMessage = response.statusText;
@@ -272,51 +680,71 @@ app.post("/api/search", async (req, res) => {
     const result = await searchWebData(query, target);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ error: String(error?.message || error) });
+    sendApiError(res, error);
   }
 });
 
 app.post("/api/analyze", async (req, res) => {
   try {
-    const { text = "", analysisTarget = "自定义", useWebSearch = false } = req.body || {};
+    const result = await withTimeout(async () => {
+      const { text = "", analysisTarget = "自定义", useWebSearch = false } = req.body || {};
+      const visualSectionLimit = ANALYZE_FAST_MODE
+        ? Math.min(VISUAL_SECTION_LIMIT, ANALYZE_FAST_VISUAL_SECTION_LIMIT)
+        : VISUAL_SECTION_LIMIT;
+      const strategicSectionLimit = ANALYZE_FAST_MODE
+        ? Math.min(STRATEGIC_SECTION_LIMIT, ANALYZE_FAST_STRATEGIC_SECTION_LIMIT)
+        : STRATEGIC_SECTION_LIMIT;
+      const visualSectionMin = Math.max(1, visualSectionLimit - 1);
+      const strategicSectionMin = Math.max(1, strategicSectionLimit - 1);
+      const analyzeMaxTokens = ANALYZE_FAST_MODE
+        ? Math.min(QWEN_MAX_TOKENS, ANALYZE_FAST_MAX_TOKENS)
+        : QWEN_MAX_TOKENS;
 
-    let enhancedText = text;
-    let searchData = "";
+      let enhancedText = text;
+      let searchData = "";
 
-    if (useWebSearch) {
-      const searchResult = await searchWebData(text, analysisTarget);
-      if (searchResult.content) {
-        searchData = searchResult.content;
-        enhancedText = `${text}\n\n【联网搜索增强数据】：\n${searchResult.content}`;
+      if (useWebSearch) {
+        const searchResult = await searchWebData(text, analysisTarget);
+        if (searchResult.content) {
+          searchData = searchResult.content;
+          enhancedText = `${text}\n\n【联网搜索增强数据】：\n${searchResult.content}`;
+        }
       }
-    }
 
-    const stage1Prompt = `分析目标：${analysisTarget}\n\n任务：请构建一份详尽的数据可视化报告，确保不遗漏任何数据点。${
-      useWebSearch ? "\n请优先使用联网搜索提供的真实数据进行填充。" : ""
-    }\n\n用户输入内容：\n${enhancedText}`;
+      const dualPrompt = `分析目标：${analysisTarget}
+${useWebSearch ? "请优先使用联网搜索增强数据。" : ""}
 
-    const visualText = await generateWithRetry(stage1Prompt, VISUAL_SYSTEM_INSTRUCTION);
-    const visual = JSON.parse(visualText || "{}");
+请基于以下输入，一次性生成两个报告对象 visual 与 strategic：
+1) visual：用于数据展示，突出关键指标、趋势和对比；
+2) strategic：用于战略建议，给出可执行动作与路线图。
 
-    const stage2Prompt = `基于原始输入内容和已生成的数据可视化报告，请生成一份深度的战略洞察报告。确保战略建议与原始数据严密挂钩，严禁空洞表述。
+输出约束：
+- 只输出 JSON 对象；
+- 顶层必须是 visual 与 strategic 两个字段；
+- visual.sections 限制为 ${visualSectionMin}-${visualSectionLimit}；
+- strategic.sections 限制为 ${strategicSectionMin}-${strategicSectionLimit}；
+- 每个 section 的 nodes 限制为 2-5；
+- 每条 content 不超过 40 个汉字，避免冗长段落。
 
-原始输入内容：
+用户输入内容：
 ${enhancedText}
 
-已生成的数据报告：
-${JSON.stringify(visual)}
+当前模式：${ANALYZE_FAST_MODE ? "FAST" : "FULL"}（请优先保证响应速度）`;
 
-任务：请使用 SWOT 矩阵、行动路线图、深度对比和核心洞察等高级组件进行战略深挖。要求：
-1. 每一项洞察必须有原始数据支撑。
-2. 战略建议必须具体、可执行。
-3. 严禁遗漏原文中的核心矛盾或机遇点。`;
+      const dualText = await generateWithRetry(dualPrompt, DUAL_REPORT_SYSTEM_INSTRUCTION, {
+        maxTokens: analyzeMaxTokens,
+      });
+      const { visual, strategic } = safeParseDualReportJson(
+        dualText,
+        visualSectionLimit,
+        strategicSectionLimit
+      );
 
-    const strategicText = await generateWithRetry(stage2Prompt, STRATEGIC_SYSTEM_INSTRUCTION);
-    const strategic = JSON.parse(strategicText || "{}");
-
-    res.json({ visual, strategic, searchData });
+      return { visual, strategic, searchData };
+    }, ANALYZE_TIMEOUT_MS, "Analyze request");
+    res.json(result);
   } catch (error) {
-    res.status(500).json({ error: String(error?.message || error) });
+    sendApiError(res, error);
   }
 });
 
@@ -330,10 +758,18 @@ app.post("/api/regenerate", async (req, res) => {
 请返回一个符合 InfographicSection 结构的 JSON 对象。`;
 
     const text = await generateWithRetry(prompt, STRATEGIC_SYSTEM_INSTRUCTION);
-    const section = JSON.parse(text || "{}");
+    const normalized = safeParseReportJson(text, "strategic", 1);
+    const section = normalized.sections[0] || {
+      logic_type: "PARALLEL",
+      template_id: "regenerate_fallback",
+      section_title: sectionTitle || "重生成模块",
+      visual_intent: "summary",
+      density: "medium",
+      nodes: normalizeNodes(nodes),
+    };
     res.json(section);
   } catch (error) {
-    res.status(500).json({ error: String(error?.message || error) });
+    sendApiError(res, error);
   }
 });
 

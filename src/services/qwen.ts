@@ -15,6 +15,7 @@ export async function searchWebData(
   const response = await requestJson(buildApiUrl("/api/search"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    timeoutMs: 120000,
     body: { query, target },
   });
 
